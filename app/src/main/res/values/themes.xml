@@ -1,9 +1,36 @@
-<resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme. -->
-    <style name="Base.Theme.AppMovilPsychoRekords" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your light theme here. -->
-        <!-- <item name="colorPrimary">@color/my_light_primary</item> -->
+<resources>
+    <style name="Theme.AppMovilPsychoRekords" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/psycho_green</item>
+        <item name="colorOnPrimary">@color/psycho_background</item>
+        <item name="colorSecondary">@color/psycho_teal</item>
+        <item name="colorSurface">@color/psycho_surface</item>
+        <item name="android:windowBackground">@color/psycho_background</item>
+        <item name="android:fontFamily">@font/nunito_family</item>
+        <item name="fontFamily">@font/nunito_family</item>
+        <item name="textAppearanceBodyLarge">@style/TextAppearance.Psycho.Body</item>
+        <item name="textAppearanceBodyMedium">@style/TextAppearance.Psycho.Body</item>
+        <item name="textAppearanceTitleLarge">@style/TextAppearance.Psycho.Title</item>
+        <item name="textAppearanceLabelLarge">@style/TextAppearance.Psycho.Label</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
     </style>
-
-    <style name="Theme.AppMovilPsychoRekords" parent="Base.Theme.AppMovilPsychoRekords" />
+    <style name="TextAppearance.Psycho.Body" parent="TextAppearance.Material3.BodyLarge">
+        <item name="fontFamily">@font/nunito_family</item>
+        <item name="android:fontFamily">@font/nunito_family</item>
+    </style>
+    <style name="TextAppearance.Psycho.Title" parent="TextAppearance.Material3.TitleLarge">
+        <item name="fontFamily">@font/nunito_family</item>
+        <item name="android:fontFamily">@font/nunito_family</item>
+        <item name="android:textFontWeight">600</item>
+    </style>
+    <style name="TextAppearance.Psycho.Label" parent="TextAppearance.Material3.LabelLarge">
+        <item name="fontFamily">@font/nunito_family</item>
+        <item name="android:fontFamily">@font/nunito_family</item>
+    </style>
+    <style name="TextAppearance.Psycho.Navigation" parent="TextAppearance.Material3.LabelMedium">
+        <item name="fontFamily">@font/nunito_family</item>
+        <item name="android:fontFamily">@font/nunito_family</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:textFontWeight">600</item>
+    </style>
 </resources>

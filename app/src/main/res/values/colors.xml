@@ -1,5 +1,10 @@
-<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="black">#FF000000</color>
-    <color name="white">#FFFFFFFF</color>
+    <!-- Colores originales de src/styles.css de la web. -->
+    <color name="psycho_green">#3CEA5F</color>
+    <color name="psycho_light_green">#B9FF94</color>
+    <color name="psycho_teal">#15B392</color>
+    <color name="psycho_background">#031A16</color>
+    <color name="psycho_surface">#102B25</color>
+    <color name="psycho_text">#F5FAF4</color>
+    <color name="psycho_muted">#B3C6BC</color>
 </resources>

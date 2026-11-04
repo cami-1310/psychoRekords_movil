@@ -13,3 +13,6 @@
 .externalNativeBuild
 .cxx
 local.properties
+/.kotlin/
+/app/src/test/java/com/example/appmovilpsychorekords/CatalogTest.kt
+/app/src/androidTest/java/com/example/appmovilpsychorekords/StorefrontTest.kt

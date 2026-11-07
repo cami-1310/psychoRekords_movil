@@ -13,6 +13,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.*
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -25,7 +26,6 @@ import com.google.android.material.snackbar.Snackbar
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
 
-/** Vistas Android nativas. No hay WebView ni dependencias del servidor en este prototipo. */
 class MainActivity : AppCompatActivity() {
     private val green = Color.rgb(60, 234, 95)
     private val dark = Color.rgb(3, 26, 22)
@@ -36,7 +36,12 @@ class MainActivity : AppCompatActivity() {
     private val emphasisFont by lazy { Typeface.create(regularFont, 600, false) }
     private val cart = ShoppingCart()
     private val favorites = mutableSetOf<Int>()
-    private val prefs by lazy { getSharedPreferences("psycho_front", MODE_PRIVATE) }
+    private val prefs by lazy { getSharedPreferences("psycho_catalog", MODE_PRIVATE) }
+    private val storeState by viewModels<StoreState>()
+    private val api by lazy { PsychoApi(getString(R.string.psycho_api_url)) }
+    private var records = emptyList<Record>()
+    private var loadingCatalog = true
+    private var catalogError: String? = null
     private lateinit var container: FrameLayout
     private lateinit var nav: BottomNavigationView
     private var tab = 1
@@ -59,7 +64,6 @@ class MainActivity : AppCompatActivity() {
             isAppearanceLightStatusBars = false
             isAppearanceLightNavigationBars = false
         }
-        cart.restore(DemoCatalog.records.associate { it.id to prefs.getInt("cart_${it.id}", 0) })
         favorites.addAll(prefs.getStringSet("favorites", emptySet()).orEmpty().mapNotNull { it.toIntOrNull() })
         tab = savedInstanceState?.getInt("tab", 1) ?: 1
         detailId = savedInstanceState?.getInt("detail", 0) ?: 0
@@ -94,6 +98,7 @@ class MainActivity : AppCompatActivity() {
             }
         })
         render()
+        loadCatalog()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -107,7 +112,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun persist() {
         prefs.edit().apply {
-            DemoCatalog.records.forEach { putInt("cart_${it.id}", cart.quantity(it.id)) }
+            records.forEach { putInt("cart_${it.id}", cart.quantity(it.id)) }
             putStringSet("favorites", favorites.map { it.toString() }.toSet())
         }.apply()
         updateBadge()
@@ -134,7 +139,8 @@ class MainActivity : AppCompatActivity() {
         val page = column().apply { setPadding(dp(20), dp(12), dp(20), dp(24)) }
         scroll.addView(page)
         container.addView(scroll)
-        if (detailId != 0) showDetail(page, DemoCatalog.records.first { it.id == detailId })
+        val record = records.find { it.id == detailId }
+        if (record != null) showDetail(page, record)
         else when (tab) {
             1 -> showHome(page)
             2 -> showCatalog(page)
@@ -189,7 +195,7 @@ class MainActivity : AppCompatActivity() {
         heading.addView(link("Ver todo") { go(2) })
         page.addView(heading)
         space(page, 12)
-        productGrid(page, DemoCatalog.records.take(2))
+        if (!catalogStatus(page)) productGrid(page, records.take(2))
         space(page, 20)
         val note = panel()
         note.addView(text("Mucho más que música", 20, white, true))
@@ -197,7 +203,6 @@ class MainActivity : AppCompatActivity() {
         note.addView(text("Rescatamos la calidez de los formatos clásicos y la cultura de coleccionar.", 14, muted))
         note.addView(link("Conoce PsychoRekords  →") { about() })
         page.addView(note)
-        demoNote(page)
     }
 
     private fun showCatalog(page: LinearLayout) {
@@ -205,6 +210,8 @@ class MainActivity : AppCompatActivity() {
         space(page, 6)
         page.addView(text("Catálogo", 32, white, true))
         space(page, 16)
+        if (catalogStatus(page)) return
+        page.addView(link("Actualizar catálogo") { loadCatalog() })
         val search = input("Buscar artista, álbum o género", query)
         page.addView(search.first)
         space(page, 10)
@@ -229,8 +236,8 @@ class MainActivity : AppCompatActivity() {
         page.addView(list)
         fun refresh() {
             list.removeAllViews()
-            val records = DemoCatalog.filter(query, format, if (onlyFavorites) favorites else null)
-            results.text = "${records.size} piezas · precios de demostración"
+            val records = records.filterCatalog(query, format, if (onlyFavorites) favorites else null)
+            results.text = "${records.size} piezas"
             if (records.isEmpty()) empty(list, "Sin coincidencias", "Prueba otro artista, formato o desactiva favoritos.", "Limpiar filtros") {
                 query = ""; format = "Todos"; onlyFavorites = false; render()
             } else productGrid(list, records)
@@ -266,7 +273,7 @@ class MainActivity : AppCompatActivity() {
         card.addView(art, LinearLayout.LayoutParams(-1, dp(if (resources.configuration.screenWidthDp >= 600) 200 else 140)))
         art.setOnClickListener { openDetail(record) }
         space(card, 10)
-        card.addView(text("${record.format.uppercase()} · ${record.year}", 10, green, true))
+        card.addView(text(listOfNotNull(record.format.uppercase(), record.year?.toString()).joinToString(" · "), 10, green, true))
         card.addView(text(record.title, 16, white, true).apply { minLines = 2; setOnClickListener { openDetail(record) } })
         card.addView(text(record.artist, 12, muted).apply { minLines = 2 })
         space(card, 4)
@@ -287,7 +294,8 @@ class MainActivity : AppCompatActivity() {
         space(page, 16)
         page.addView(text(pesos(record.price), 28, green, true))
         space(page, 12)
-        page.addView(text("${record.year} · ${record.condition}\n${record.stock} disponibles · ${cart.quantity(record.id)} en tu carrito", 14, muted))
+        val details = listOfNotNull(record.year?.toString(), record.condition).joinToString(" · ")
+        page.addView(text("$details\n${record.stock} disponibles · ${cart.quantity(record.id)} en tu carrito", 14, muted))
         space(page, 16)
         page.addView(text("Una pieza para tu colección. Explora el sonido de ${record.artist} en formato ${record.format.lowercase()}.", 16, white))
         space(page, 20)
@@ -299,27 +307,27 @@ class MainActivity : AppCompatActivity() {
             if (!favorites.add(record.id)) favorites.remove(record.id)
             persist(); render()
         })
-        demoNote(page)
     }
 
     private fun showCart(page: LinearLayout) {
         page.addView(text("TU PRÓXIMA COLECCIÓN", 11, green, true))
         page.addView(text("Mi carrito", 32, white, true))
         space(page, 8)
+        if (catalogStatus(page)) return
         page.addView(text("${cart.count} piezas seleccionadas", 14, muted))
         space(page, 20)
         if (cart.count == 0) {
             empty(page, "El primer disco te espera", "Explora el catálogo y empieza tu colección.", "Descubrir música") { go(2) }
             return
         }
-        DemoCatalog.records.filter { cart.quantity(it.id) > 0 }.forEach { record ->
+        records.filter { cart.quantity(it.id) > 0 }.forEach { record ->
             val card = panel()
             val line = row()
             line.addView(cover(record), LinearLayout.LayoutParams(dp(72), dp(72)))
             val info = column().apply { setPadding(dp(12), 0, 0, 0) }
             info.addView(text(record.title, 17, white, true))
             info.addView(text("${record.artist} · ${record.format}", 12, muted))
-            info.addView(text(pesos(record.price * cart.quantity(record.id)), 16, green, true))
+            info.addView(text(pesos(record.price * cart.quantity(record.id).toBigDecimal()), 16, green, true))
             line.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
             card.addView(line)
             val controls = row()
@@ -337,7 +345,7 @@ class MainActivity : AppCompatActivity() {
             space(page, 12)
         }
         val summary = panel()
-        summary.addView(text("Subtotal     ${pesos(cart.total)}", 22, white, true))
+        summary.addView(text("Subtotal     ${pesos(cart.total(records))}", 22, white, true))
         space(summary, 8)
         summary.addView(text("Envío pendiente de calcular.\nEsta vista no realiza cobros ni genera pedidos.", 13, muted))
         summary.addView(button("Revisar pedido de muestra") { checkout() })
@@ -346,7 +354,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun checkout() {
         MaterialAlertDialogBuilder(this).setTitle("Resumen de demostración")
-            .setMessage("${cart.count} piezas\nSubtotal: ${pesos(cart.total)}\n\nLa dirección, el envío y el pago se conectarán al backend en la siguiente etapa. Tu carrito se conserva.")
+            .setMessage("${cart.count} piezas\nSubtotal: ${pesos(cart.total(records))}\n\nLa dirección, el envío y el pago se conectarán al backend en la siguiente etapa. Tu carrito se conserva.")
             .setPositiveButton("Seguir explorando") { _, _ -> go(2) }.setNegativeButton("Volver", null).show()
     }
 
@@ -357,50 +365,98 @@ class MainActivity : AppCompatActivity() {
         page.addView(text("Tus favoritos, tus discos, tu historia.", 16, muted))
         space(page, 22)
         val card = panel()
-        card.addView(text("Bienvenido a PsychoRekords", 21, white, true))
-        space(card, 8)
-        card.addView(text("Explora como invitado. El inicio de sesión y los pedidos estarán disponibles al conectar el servidor.", 14, muted))
-        card.addView(button("Ver inicio de sesión") { auth(false) })
-        card.addView(button("Crear cuenta", true) { auth(true) })
+        val session = storeState.session?.takeUnless { it.expired }
+        if (session == null) {
+            storeState.session = null
+            card.addView(text("Bienvenido a PsychoRekords", 21, white, true))
+            space(card, 8)
+            card.addView(text("Entra con tu cuenta de la web o crea una aquí.", 14, muted))
+            card.addView(button("Iniciar sesión") { auth(false) })
+            card.addView(button("Crear cuenta", true) { auth(true) })
+        } else {
+            card.addView(text("Hola, ${session.name}", 21, white, true))
+            card.addView(text(session.email, 14, muted))
+            card.addView(button("Cerrar sesión", true) {
+                storeState.session = null
+                render()
+                request({ api.logout(session) }) { result ->
+                    result.onFailure { message("Sesión cerrada en este equipo. No se pudo avisar al servidor.") }
+                }
+            })
+        }
         page.addView(card)
         space(page, 18)
         page.addView(button("Mis favoritos · ${favorites.size}", true) { onlyFavorites = true; query = ""; format = "Todos"; go(2) })
         page.addView(button("Mis pedidos", true) {
             MaterialAlertDialogBuilder(this).setTitle("Mis pedidos")
-                .setMessage("Todavía no hay pedidos en esta demostración. Aquí aparecerá tu historial cuando conectemos tu cuenta.")
+                .setMessage("El historial de pedidos se puede consultar desde la web.")
                 .setPositiveButton("Entendido", null).show()
         })
         page.addView(button("Sobre nosotros", true) { about() })
         page.addView(button("Preguntas frecuentes", true) { faq() })
-        demoNote(page)
     }
 
-    private fun auth(register: Boolean) {
+    private fun auth(register: Boolean, initialEmail: String = "") {
         val form = column().apply { setPadding(dp(24), dp(8), dp(24), 0) }
         val name = if (register) input("Nombre") else null
         name?.let { form.addView(it.first) }
-        val email = input("Correo electrónico")
+        val surname = if (register) input("Apellido paterno") else null
+        surname?.let { form.addView(it.first) }
+        val email = input("Correo electrónico", initialEmail)
         email.second.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
         form.addView(email.first)
         val password = input("Contraseña")
         password.second.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         password.first.endIconMode = TextInputLayout.END_ICON_PASSWORD_TOGGLE
         form.addView(password.first)
-        form.addView(text("Vista de formulario: no se envían ni guardan estos datos.", 12, muted))
+        val status = text("", 14, muted)
+        form.addView(status)
         val scroll = ScrollView(this).apply { addView(form) }
         val dialog = MaterialAlertDialogBuilder(this).setTitle(if (register) "Crear cuenta" else "Iniciar sesión")
-            .setView(scroll).setPositiveButton("Revisar formulario", null).setNegativeButton("Cerrar", null).create()
+            .setView(scroll).setPositiveButton(if (register) "Crear cuenta" else "Entrar", null)
+            .setNegativeButton("Cerrar", null).create()
         dialog.setOnShowListener {
             dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val validEmail = android.util.Patterns.EMAIL_ADDRESS.matcher(email.second.text.toString().trim()).matches()
+                val address = email.second.text.toString().trim()
+                val secret = password.second.text.toString()
+                val firstName = name?.second?.text.toString().trim()
+                val lastName = surname?.second?.text.toString().trim()
+                val validEmail = address.length <= 100 && android.util.Patterns.EMAIL_ADDRESS.matcher(address).matches()
                 email.first.error = if (validEmail) null else "Escribe un correo válido"
-                val validPassword = password.second.text.toString().length >= 8
-                password.first.error = if (validPassword) null else "Usa al menos 8 caracteres"
-                val validName = name == null || name.second.text.toString().trim().isNotEmpty()
-                name?.first?.error = if (validName) null else "Escribe tu nombre"
-                if (validEmail && validPassword && validName) {
-                    dialog.dismiss()
-                    message("Formulario válido. Conexión al servidor pendiente.")
+                val validPassword = secret.length >= (if (register) 8 else 1) && secret.toByteArray().size <= 256
+                password.first.error = if (validPassword) null else if (register) "Usa al menos 8 caracteres y hasta 256 bytes" else "Revisa tu contraseña"
+                val validName = !register || firstName.length in 1..50
+                val validSurname = !register || lastName.length in 1..50
+                name?.first?.error = if (validName) null else "Escribe tu nombre (máximo 50 caracteres)"
+                surname?.first?.error = if (validSurname) null else "Escribe tu apellido (máximo 50 caracteres)"
+                if (!validEmail || !validPassword || !validName || !validSurname) return@setOnClickListener
+
+                val submit = dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE)
+                val cancel = dialog.getButton(android.app.AlertDialog.BUTTON_NEGATIVE)
+                submit.isEnabled = false
+                cancel.isEnabled = false
+                dialog.setCancelable(false)
+                status.text = "Conectando…"
+                request({
+                    if (register) {
+                        api.register(firstName, lastName, address, secret)
+                        null
+                    } else api.login(address, secret)
+                }) { result ->
+                    result.onSuccess { session ->
+                        storeState.session = session
+                        dialog.dismiss()
+                        render()
+                        if (register) {
+                            auth(false, address)
+                            message("Cuenta creada. Ya puedes entrar en la app y en la web.")
+                        }
+                    }.onFailure {
+                        submit.isEnabled = true
+                        cancel.isEnabled = true
+                        dialog.setCancelable(true)
+                        status.text = errorMessage(it)
+                    }
                 }
             }
         }
@@ -467,9 +523,48 @@ class MainActivity : AppCompatActivity() {
         parent.addView(panel)
     }
 
-    private fun demoNote(page: LinearLayout) {
-        space(page, 20)
-        page.addView(text("VISTA PREVIA · Catálogo y precios de muestra", 11, muted).apply { gravity = Gravity.CENTER })
+    private fun loadCatalog() {
+        loadingCatalog = true
+        catalogError = null
+        render()
+        request(api::products) { result ->
+            loadingCatalog = false
+            result.onSuccess { products ->
+                records = products
+                cart.restore(records) { prefs.getInt("cart_$it", 0) }
+                persist()
+            }.onFailure { catalogError = errorMessage(it) }
+            render()
+        }
+    }
+
+    private fun catalogStatus(page: LinearLayout): Boolean {
+        if (loadingCatalog) {
+            page.addView(text("Cargando catálogo…", 15, muted))
+            return true
+        }
+        catalogError?.let {
+            empty(page, "No se pudo cargar el catálogo", it, "Reintentar") { loadCatalog() }
+            return true
+        }
+        if (records.isEmpty()) {
+            empty(page, "Catálogo vacío", "Aún no hay productos registrados.", "Actualizar") { loadCatalog() }
+            return true
+        }
+        return false
+    }
+
+    private fun errorMessage(error: Throwable): String =
+        if (error is ApiError) error.message.orEmpty()
+        else "No se pudo consultar la API. Revisa que el servidor local esté disponible."
+
+    private fun <T> request(operation: () -> T, complete: (Result<T>) -> Unit) {
+        storeState.network.execute {
+            val result = runCatching(operation)
+            runOnUiThread {
+                if (!isDestroyed && !isFinishing) complete(result)
+            }
+        }
     }
 
     private fun message(value: String) { Snackbar.make(container, value, Snackbar.LENGTH_LONG).setAnchorView(nav).show() }

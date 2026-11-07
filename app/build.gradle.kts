@@ -4,6 +4,9 @@ plugins {
 
 android {
     namespace = "com.example.appmovilpsychorekords"
+    buildFeatures {
+        resValues = true
+    }
     compileSdk {
         version = release(37)
     }
@@ -16,6 +19,8 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        resValue("string", "psycho_api_url", providers.gradleProperty("psychoApiUrl")
+            .orElse("http://10.0.2.2:3000/api").get())
     }
 
     buildTypes {

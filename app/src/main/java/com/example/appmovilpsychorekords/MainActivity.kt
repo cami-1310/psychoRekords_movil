@@ -6,25 +6,28 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.text.Editable
-import android.text.TextWatcher
+import android.text.InputFilter
 import android.text.InputType
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
-import android.view.ViewGroup
 import android.widget.*
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.res.ResourcesCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
-import androidx.core.content.res.ResourcesCompat
 import com.google.android.material.bottomnavigation.BottomNavigationView
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.snackbar.Snackbar
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
+import java.math.BigDecimal
+import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
     private val green = Color.rgb(60, 234, 95)
@@ -32,32 +35,76 @@ class MainActivity : AppCompatActivity() {
     private val surface = Color.rgb(16, 43, 37)
     private val muted = Color.rgb(179, 198, 188)
     private val white = Color.rgb(245, 250, 244)
+    private val danger = Color.rgb(255, 110, 110)
     private val regularFont by lazy { ResourcesCompat.getFont(this, R.font.nunito_family)!! }
     private val emphasisFont by lazy { Typeface.create(regularFont, 600, false) }
-    private val cart = ShoppingCart()
     private val favorites = mutableSetOf<Int>()
     private val prefs by lazy { getSharedPreferences("psycho_catalog", MODE_PRIVATE) }
     private val storeState by viewModels<StoreState>()
     private val api by lazy { PsychoApi(getString(R.string.psycho_api_url)) }
-    private var records = emptyList<Record>()
+
+    private val cart: ShoppingCart get() = storeState.cart
+    private var records: List<Record>
+        get() = storeState.records
+        set(value) { storeState.records = value }
+
     private var loadingCatalog = true
     private var catalogError: String? = null
     private lateinit var container: FrameLayout
     private lateinit var nav: BottomNavigationView
     private var tab = 1
     private var detailId = 0
+
+    // Filtros del catálogo / inventario (sincronizados con la web)
     private var query = ""
     private var format = "Todos"
+    private var genreFilter = "Todos"
+    private var conditionFilter = "Todas"
+    private var maxPriceText = ""
+    private var onlyAvailable = false
+    private var sortBy = ""
     private var onlyFavorites = false
+
+    // Estado de Mis Pedidos (OrderTrackingScreen de Chris)
     private var ordersOpen = false
+
+    // Estado de Checkout y Pagos
+    private var checkoutOpen = false
+    private var loadingCheckoutOptions = false
+    private var tarifas = DEFAULT_TARIFAS_ENVIO
+    private var puntos = DEFAULT_PUNTOS_ENTREGA
+    private var selectedEntrega = "" // "tarifa-<id>" o "punto-<id>"
+    private var destNombre = ""
+    private var destTelefono = ""
+    private var destCalle = ""
+    private var destNumero = ""
+    private var destColonia = ""
+    private var destCp = ""
+    private var destCiudad = ""
+    private var destEstado = ""
+    private var destReferencias = ""
+    private var contactoCorreo = ""
+    private var contactoTelefono = ""
+    private var contactoReferencias = ""
+    private var checkoutFieldErrors = emptyMap<String, String>()
+    private var checkoutGeneralError: String? = null
+    private var pagoPaypalRealizado = false
+    private var paypalOrderId: String? = null
+    private var submittingPurchase = false
+    private var ventaConfirmada: VentaConfirmada? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.enableEdgeToEdge(window)
         setContentView(R.layout.activity_main)
         val root = findViewById<View>(R.id.main)
+        container = findViewById(R.id.screen_container)
+        nav = findViewById(R.id.bottom_navigation)
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
+            val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
+            val inSubScreen = detailId != 0 || checkoutOpen || ordersOpen
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime())
+            nav.visibility = if (imeVisible || inSubScreen) View.GONE else View.VISIBLE
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
             insets
         }
@@ -65,18 +112,27 @@ class MainActivity : AppCompatActivity() {
             isAppearanceLightStatusBars = false
             isAppearanceLightNavigationBars = false
         }
+        if (!storeState.cartLoaded) {
+            cart.loadFromPrefs(prefs)
+            storeState.cartLoaded = true
+        }
         favorites.addAll(prefs.getStringSet("favorites", emptySet()).orEmpty().mapNotNull { it.toIntOrNull() })
         tab = savedInstanceState?.getInt("tab", 1) ?: 1
         detailId = savedInstanceState?.getInt("detail", 0) ?: 0
         query = savedInstanceState?.getString("query").orEmpty()
         format = savedInstanceState?.getString("format") ?: "Todos"
+        genreFilter = savedInstanceState?.getString("genreFilter") ?: "Todos"
+        conditionFilter = savedInstanceState?.getString("conditionFilter") ?: "Todas"
+        maxPriceText = savedInstanceState?.getString("maxPriceText").orEmpty()
+        onlyAvailable = savedInstanceState?.getBoolean("onlyAvailable", false) ?: false
+        sortBy = savedInstanceState?.getString("sortBy").orEmpty()
         onlyFavorites = savedInstanceState?.getBoolean("favorites", false) ?: false
         ordersOpen = savedInstanceState?.getBoolean("orders", false) ?: false
-        container = findViewById(R.id.screen_container)
-        nav = findViewById(R.id.bottom_navigation)
+
         listOf("Inicio", "Catálogo", "Carrito", "Cuenta").forEachIndexed { index, title ->
             nav.menu.add(0, index + 1, index, title).setIcon(
-                listOf(R.drawable.ic_home, R.drawable.ic_records, R.drawable.ic_cart, R.drawable.ic_person)[index])
+                listOf(R.drawable.ic_home, R.drawable.ic_records, R.drawable.ic_cart, R.drawable.ic_person)[index]
+            )
         }
         val tint = ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()), intArrayOf(green, muted))
         nav.itemIconTintList = tint
@@ -88,6 +144,7 @@ class MainActivity : AppCompatActivity() {
         nav.selectedItemId = tab
         nav.setOnItemSelectedListener { item ->
             ordersOpen = false
+            checkoutOpen = false
             tab = item.itemId
             detailId = 0
             render()
@@ -95,14 +152,27 @@ class MainActivity : AppCompatActivity() {
         }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (ordersOpen) { ordersOpen = false; render() }
-                else if (detailId != 0) { detailId = 0; render() }
-                else if (tab != 1) go(1)
-                else { isEnabled = false; onBackPressedDispatcher.onBackPressed() }
+                when {
+                    ordersOpen -> { ordersOpen = false; render() }
+                    detailId != 0 -> { detailId = 0; render() }
+                    checkoutOpen -> {
+                        if (!submittingPurchase) {
+                            checkoutOpen = false
+                            render()
+                        }
+                    }
+                    tab != 1 -> go(1)
+                    else -> { isEnabled = false; onBackPressedDispatcher.onBackPressed() }
+                }
             }
         })
-        render()
-        loadCatalog()
+        if (records.isNotEmpty()) {
+            loadingCatalog = false
+            render()
+        } else {
+            render()
+            loadCatalog()
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -111,15 +181,18 @@ class MainActivity : AppCompatActivity() {
         outState.putInt("detail", detailId)
         outState.putString("query", query)
         outState.putString("format", format)
+        outState.putString("genreFilter", genreFilter)
+        outState.putString("conditionFilter", conditionFilter)
+        outState.putString("maxPriceText", maxPriceText)
+        outState.putBoolean("onlyAvailable", onlyAvailable)
+        outState.putString("sortBy", sortBy)
         outState.putBoolean("favorites", onlyFavorites)
         outState.putBoolean("orders", ordersOpen)
     }
 
     private fun persist() {
-        prefs.edit().apply {
-            records.forEach { putInt("cart_${it.id}", cart.quantity(it.id)) }
-            putStringSet("favorites", favorites.map { it.toString() }.toSet())
-        }.apply()
+        cart.saveToPrefs(prefs)
+        prefs.edit().putStringSet("favorites", favorites.map { it.toString() }.toSet()).apply()
         updateBadge()
     }
 
@@ -132,6 +205,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun go(destination: Int) {
         detailId = 0
+        checkoutOpen = false
+        ordersOpen = false
         tab = destination
         nav.selectedItemId = destination
         render()
@@ -140,6 +215,10 @@ class MainActivity : AppCompatActivity() {
     private fun render() {
         container.removeAllViews()
         updateBadge()
+        val inSubScreen = detailId != 0 || checkoutOpen || ordersOpen
+        val imeVisible = ViewCompat.getRootWindowInsets(container)?.isVisible(WindowInsetsCompat.Type.ime()) == true
+        nav.visibility = if (imeVisible || inSubScreen) View.GONE else View.VISIBLE
+
         if (ordersOpen) {
             val session = storeState.session?.takeUnless { it.expired }
             if (session != null) {
@@ -157,18 +236,27 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             ordersOpen = false
+            nav.visibility = if (imeVisible) View.GONE else View.VISIBLE
         }
-        val scroll = ScrollView(this).apply { isFillViewport = true; clipToPadding = false }
-        val page = column().apply { setPadding(dp(20), dp(12), dp(20), dp(24)) }
+
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            clipToPadding = false
+            isSmoothScrollingEnabled = true
+        }
+        val page = column().apply { setPadding(dp(20), dp(12), dp(20), dp(36)) }
         scroll.addView(page)
         container.addView(scroll)
         val record = records.find { it.id == detailId }
-        if (record != null) showDetail(page, record)
-        else when (tab) {
-            1 -> showHome(page)
-            2 -> showCatalog(page)
-            3 -> showCart(page)
-            4 -> showAccount(page)
+        when {
+            record != null -> showDetail(page, record)
+            checkoutOpen -> showCheckout(page)
+            else -> when (tab) {
+                1 -> showHome(page)
+                2 -> showCatalog(page)
+                3 -> showCart(page)
+                4 -> showAccount(page)
+            }
         }
     }
 
@@ -176,7 +264,6 @@ class MainActivity : AppCompatActivity() {
         val row = row()
         row.addView(ImageView(this).apply {
             setImageResource(R.drawable.logo_rana); contentDescription = "Logo de PsychoRekords"
-            // Fondo solo para el PNG: mantiene legible el contorno oscuro de la rana.
             background = rounded(Color.WHITE, 16)
             setPadding(dp(7), dp(7), dp(7), dp(7))
             scaleType = ImageView.ScaleType.FIT_CENTER
@@ -197,8 +284,10 @@ class MainActivity : AppCompatActivity() {
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }, FrameLayout.LayoutParams(-1, -1))
         hero.addView(View(this).apply {
-            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(0x33031A16, 0xF5031A16.toInt()))
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(0x33031A16, 0xF5031A16.toInt())
+            )
         }, FrameLayout.LayoutParams(-1, -1))
         val copy = column().apply { setPadding(dp(22), dp(24), dp(22), dp(20)) }
         copy.addView(text("PARA QUIENES ESCUCHAN DIFERENTE", 10, green, true).apply { letterSpacing = .03f })
@@ -231,49 +320,192 @@ class MainActivity : AppCompatActivity() {
     private fun showCatalog(page: LinearLayout) {
         page.addView(text("ENCUENTRA TU SONIDO", 11, green, true))
         space(page, 6)
-        page.addView(text("Catálogo", 32, white, true))
-        space(page, 16)
+        val header = row()
+        header.addView(text("Catálogo", 32, white, true), LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(link("Actualizar stock") { loadCatalog() })
+        page.addView(header)
+        space(page, 12)
         if (catalogStatus(page)) return
-        page.addView(link("Actualizar catálogo") { loadCatalog() })
-        val search = input("Buscar artista, álbum o género", query)
+
+        val search = input("Buscar título, artista, género o formato", query)
         page.addView(search.first)
-        space(page, 10)
+        space(page, 6)
+
         val horizontal = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
         val filters = row()
         horizontal.addView(filters)
         page.addView(horizontal)
         listOf("Todos", "Vinilo", "CD", "Cassette").forEach { label ->
             filters.addView(button(label, format != label) {
-                query = search.second.text.toString(); format = label; render()
+                query = search.second.text.toString()
+                format = label
+                render()
             }, LinearLayout.LayoutParams(-2, dp(48)).apply { marginEnd = dp(8) })
         }
-        val favoriteToggle = com.google.android.material.materialswitch.MaterialSwitch(this).apply {
+        space(page, 8)
+
+        val generos = listOf("Todos") + records.map { it.genre.trim() }.filter { it.isNotEmpty() }.distinct().sorted()
+        val condiciones = listOf("Todas") + CONDICIONES_PRODUCTO
+        val ordenes = listOf(
+            "" to "Orden: Predeterminado",
+            "precio_asc" to "Precio: menor a mayor",
+            "precio_desc" to "Precio: mayor a menor",
+            "anio_desc" to "Año: más reciente"
+        )
+        val ordenActualTexto = ordenes.firstOrNull { it.first == sortBy }?.second ?: "Orden: Predeterminado"
+
+        val filterRow1 = row()
+        filterRow1.addView(button("Género: $genreFilter", genreFilter == "Todos") {
+            query = search.second.text.toString()
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Filtrar por género")
+                .setItems(generos.toTypedArray()) { _, which ->
+                    genreFilter = generos[which]
+                    render()
+                }
+                .setNegativeButton("Cerrar", null)
+                .show()
+        }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(6) })
+
+        filterRow1.addView(button("Condición: $conditionFilter", conditionFilter == "Todas") {
+            query = search.second.text.toString()
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Filtrar por condición")
+                .setItems(condiciones.toTypedArray()) { _, which ->
+                    conditionFilter = condiciones[which]
+                    render()
+                }
+                .setNegativeButton("Cerrar", null)
+                .show()
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        page.addView(filterRow1)
+        space(page, 6)
+
+        val filterRow2 = row()
+        filterRow2.addView(button(ordenActualTexto, sortBy.isEmpty()) {
+            query = search.second.text.toString()
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Ordenar catálogo")
+                .setItems(ordenes.map { it.second }.toTypedArray()) { _, which ->
+                    sortBy = ordenes[which].first
+                    render()
+                }
+                .setNegativeButton("Cerrar", null)
+                .show()
+        }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(6) })
+
+        val precioLabel = if (maxPriceText.isBlank()) "Precio máx: Todos" else "Máx: $$maxPriceText"
+        filterRow2.addView(button(precioLabel, maxPriceText.isBlank()) {
+            query = search.second.text.toString()
+            promptMaxPrice()
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        page.addView(filterRow2)
+        space(page, 6)
+
+        val availableToggle = MaterialSwitch(this).apply {
             typeface = regularFont
-            text = "Solo mis favoritos"; setTextColor(muted); isChecked = onlyFavorites; minHeight = dp(48)
+            text = "Solo productos con stock disponible"
+            setTextColor(muted)
+            isChecked = onlyAvailable
+            minHeight = dp(44)
+        }
+        page.addView(availableToggle)
+
+        val favoriteToggle = MaterialSwitch(this).apply {
+            typeface = regularFont
+            text = "Solo mis favoritos"
+            setTextColor(muted)
+            isChecked = onlyFavorites
+            minHeight = dp(44)
         }
         page.addView(favoriteToggle)
+
+        val statusRow = row()
         val results = text("", 12, muted)
-        page.addView(results)
+        statusRow.addView(results, LinearLayout.LayoutParams(0, -2, 1f))
+        statusRow.addView(link("Limpiar filtros") {
+            resetCatalogFilters()
+            render()
+        })
+        page.addView(statusRow)
         space(page, 12)
+
         val list = column()
         page.addView(list)
+
         fun refresh() {
             list.removeAllViews()
-            val records = records.filterCatalog(query, format, if (onlyFavorites) favorites else null)
-            results.text = "${records.size} piezas"
-            if (records.isEmpty()) empty(list, "Sin coincidencias", "Prueba otro artista, formato o desactiva favoritos.", "Limpiar filtros") {
-                query = ""; format = "Todos"; onlyFavorites = false; render()
-            } else productGrid(list, records)
+            val maxPrice = maxPriceText.toBigDecimalOrNull()
+            val filtered = records.filterCatalog(
+                query = query,
+                format = format,
+                favorites = if (onlyFavorites) favorites else null,
+                genre = genreFilter,
+                condition = conditionFilter,
+                maxPrice = maxPrice,
+                onlyAvailable = onlyAvailable,
+                sortBy = sortBy
+            )
+            results.text = "${filtered.size} de ${records.size} piezas · Inventario sincronizado"
+            if (filtered.isEmpty()) {
+                empty(
+                    list,
+                    "Sin coincidencias",
+                    "Prueba otro artista, formato, condición o limpia los filtros activos.",
+                    "Limpiar filtros"
+                ) {
+                    resetCatalogFilters()
+                    render()
+                }
+            } else {
+                productGrid(list, filtered)
+            }
         }
+
         search.second.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                query = s.toString(); refresh()
+                query = s.toString()
+                refresh()
             }
             override fun afterTextChanged(s: Editable?) = Unit
         })
+        availableToggle.setOnCheckedChangeListener { _, checked -> onlyAvailable = checked; refresh() }
         favoriteToggle.setOnCheckedChangeListener { _, checked -> onlyFavorites = checked; refresh() }
         refresh()
+    }
+
+    private fun resetCatalogFilters() {
+        query = ""
+        format = "Todos"
+        genreFilter = "Todos"
+        conditionFilter = "Todas"
+        maxPriceText = ""
+        onlyAvailable = false
+        sortBy = ""
+        onlyFavorites = false
+    }
+
+    private fun promptMaxPrice() {
+        val box = column().apply { setPadding(dp(24), dp(8), dp(24), 0) }
+        val priceInput = input("Precio máximo en MXN (vacío para todos)", maxPriceText)
+        priceInput.second.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+        box.addView(priceInput.first)
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Tope de precio")
+            .setView(box)
+            .setPositiveButton("Aplicar") { _, _ ->
+                val raw = priceInput.second.text.toString().trim()
+                val num = raw.toBigDecimalOrNull()
+                maxPriceText = if (num != null && num > BigDecimal.ZERO) num.toPlainString() else ""
+                render()
+            }
+            .setNeutralButton("Quitar tope") { _, _ ->
+                maxPriceText = ""
+                render()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
     }
 
     private fun productGrid(parent: LinearLayout, records: List<Record>) {
@@ -299,9 +531,30 @@ class MainActivity : AppCompatActivity() {
         card.addView(text(listOfNotNull(record.format.uppercase(), record.year?.toString()).joinToString(" · "), 10, green, true))
         card.addView(text(record.title, 16, white, true).apply { minLines = 2; setOnClickListener { openDetail(record) } })
         card.addView(text(record.artist, 12, muted).apply { minLines = 2 })
+        val stockText = if (record.stock > 0) "Disponibles: ${record.stock}" else "Stock agotado"
+        val stockColor = if (record.stock > 0) muted else danger
+        card.addView(text(stockText, 11, stockColor))
         space(card, 4)
         card.addView(text(pesos(record.price), 16, white, true))
-        card.addView(button("Ver disco", true) { openDetail(record) })
+        val inCart = cart.quantity(record.id)
+        val canAdd = record.stock > 0 && inCart < record.stock
+        val btnLabel = when {
+            record.stock <= 0 -> "Agotado"
+            inCart >= record.stock -> "En carrito ($inCart/${record.stock})"
+            inCart > 0 -> "Añadir otra ($inCart/${record.stock})"
+            else -> "Añadir al carrito"
+        }
+        val addBtn = button(btnLabel, false) {
+            if (cart.add(record)) {
+                persist()
+                render()
+                message("¡Añadido al carrito! (${cart.quantity(record.id)} en carrito)")
+            } else {
+                message("Ya llevas las ${record.stock} unidades disponibles en tu carrito.")
+            }
+        }.apply { isEnabled = canAdd }
+        card.addView(addBtn)
+        card.addView(button("Ver detalles", true) { openDetail(record) })
         return card
     }
 
@@ -318,67 +571,578 @@ class MainActivity : AppCompatActivity() {
         page.addView(text(pesos(record.price), 28, green, true))
         space(page, 12)
         val details = listOfNotNull(record.year?.toString(), record.condition).joinToString(" · ")
-        page.addView(text("$details\n${record.stock} disponibles · ${cart.quantity(record.id)} en tu carrito", 14, muted))
+        page.addView(text("$details\n${record.stock} disponibles en inventario · ${cart.quantity(record.id)} en tu carrito", 14, muted))
         space(page, 16)
         page.addView(text("Una pieza para tu colección. Explora el sonido de ${record.artist} en formato ${record.format.lowercase()}.", 16, white))
         space(page, 20)
         page.addView(button(if (record.stock == 0) "Agotado" else "Agregar al carrito") {
-            if (cart.add(record)) { persist(); render(); message("Agregado al carrito") }
-            else message("Ya agregaste todas las unidades disponibles")
+            if (cart.add(record)) {
+                persist()
+                render()
+                message("Agregado al carrito (${cart.quantity(record.id)} unidades)")
+            } else {
+                message("Ya agregaste todas las unidades disponibles")
+            }
         }.apply { isEnabled = record.stock > cart.quantity(record.id) })
         page.addView(button(if (record.id in favorites) "♥ Guardado en favoritos" else "♡ Guardar en favoritos", true) {
             if (!favorites.add(record.id)) favorites.remove(record.id)
-            persist(); render()
+            persist()
+            render()
         })
     }
 
     private fun showCart(page: LinearLayout) {
         page.addView(text("TU PRÓXIMA COLECCIÓN", 11, green, true))
-        page.addView(text("Mi carrito", 32, white, true))
+        val header = row()
+        header.addView(text("Mi carrito", 32, white, true), LinearLayout.LayoutParams(0, -2, 1f))
+        if (cart.count > 0) {
+            header.addView(link("Vaciar carrito") { confirmClearCart() })
+        }
+        page.addView(header)
         space(page, 8)
         if (catalogStatus(page)) return
         page.addView(text("${cart.count} piezas seleccionadas", 14, muted))
         space(page, 20)
-        if (cart.count == 0) {
-            empty(page, "El primer disco te espera", "Explora el catálogo y empieza tu colección.", "Descubrir música") { go(2) }
+        val cartRecords = records.filter { cart.quantity(it.id) > 0 }
+        if (cartRecords.isEmpty()) {
+            empty(page, "Tu carrito está vacío", "Explora el catálogo y encuentra tu próxima joya musical.", "Ir al catálogo") { go(2) }
             return
         }
-        records.filter { cart.quantity(it.id) > 0 }.forEach { record ->
+        cartRecords.forEach { record ->
             val card = panel()
             val line = row()
             line.addView(cover(record), LinearLayout.LayoutParams(dp(72), dp(72)))
             val info = column().apply { setPadding(dp(12), 0, 0, 0) }
             info.addView(text(record.title, 17, white, true))
             info.addView(text("${record.artist} · ${record.format}", 12, muted))
+            info.addView(text("Unitario: ${pesos(record.price)} · Disponibles: ${record.stock}", 12, muted))
             info.addView(text(pesos(record.price * cart.quantity(record.id).toBigDecimal()), 16, green, true))
             line.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
             card.addView(line)
             val controls = row()
-            controls.addView(button("−", true) { cart.removeOne(record.id); persist(); render() }.apply {
+            controls.addView(button("−", true) {
+                val next = cart.quantity(record.id) - 1
+                cart.removeOne(record.id)
+                persist()
+                render()
+                if (next <= 0) message("\"${record.title}\" se quitó del carrito.")
+            }.apply {
                 contentDescription = "Quitar una unidad de ${record.title}"
             }, LinearLayout.LayoutParams(dp(56), dp(48)))
-            controls.addView(text("${cart.quantity(record.id)}", 17, white, true).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(dp(36), -2))
-            controls.addView(button("+", true) { cart.add(record); persist(); render() }.apply {
+            controls.addView(text("${cart.quantity(record.id)}", 17, white, true).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(dp(40), -2))
+            controls.addView(button("+", true) {
+                if (cart.add(record)) {
+                    persist()
+                    render()
+                } else {
+                    message("Límite de stock: solo hay ${record.stock} unidades disponibles.")
+                }
+            }.apply {
                 contentDescription = "Agregar una unidad de ${record.title}"
                 isEnabled = cart.quantity(record.id) < record.stock
             }, LinearLayout.LayoutParams(dp(56), dp(48)))
-            controls.addView(link("Eliminar") { cart.remove(record.id); persist(); render() }, LinearLayout.LayoutParams(0, -2, 1f))
+            controls.addView(link("Eliminar") { confirmRemoveItem(record) }, LinearLayout.LayoutParams(0, -2, 1f))
             card.addView(controls)
             page.addView(card)
             space(page, 12)
         }
+
+        val subtotal = cart.total(records)
+        val iva = cart.iva(records)
+        val totalEstimado = cart.totalConEnvio(records, COSTO_ENVIO_ESTIMADO)
+        val session = storeState.session?.takeUnless { it.expired }
+
         val summary = panel()
-        summary.addView(text("Subtotal     ${pesos(cart.total(records))}", 22, white, true))
+        summary.addView(text("Resumen del Pedido", 20, white, true))
+        space(summary, 10)
+        summary.addView(summaryRow("Subtotal:", pesos(subtotal)))
+        summary.addView(summaryRow("IVA (16%):", "+ ${pesos(iva)}", muted))
+        summary.addView(summaryRow("Costo de Envío (base):", "+ ${pesos(COSTO_ENVIO_ESTIMADO)}", muted))
         space(summary, 8)
-        summary.addView(text("Envío pendiente de calcular.\nEsta vista no realiza cobros ni genera pedidos.", 13, muted))
-        summary.addView(button("Revisar pedido de muestra") { checkout() })
+        summary.addView(summaryRow("Total estimado:", pesos(totalEstimado), green, bold = true, textSize = 19))
+        space(summary, 6)
+        summary.addView(text("En el checkout podrás elegir envío a domicilio por paquetería o entrega gratuita en punto medio (Aguascalientes).", 12, muted))
+        space(summary, 12)
+        if (session != null) {
+            summary.addView(button("Proceder al Checkout") { startCheckout() })
+        } else {
+            summary.addView(button("Inicia sesión para continuar") {
+                go(4)
+                auth(false)
+            })
+        }
         page.addView(summary)
     }
 
-    private fun checkout() {
-        MaterialAlertDialogBuilder(this).setTitle("Resumen de demostración")
-            .setMessage("${cart.count} piezas\nSubtotal: ${pesos(cart.total(records))}\n\nLa dirección, el envío y el pago se conectarán al backend en la siguiente etapa. Tu carrito se conserva.")
-            .setPositiveButton("Seguir explorando") { _, _ -> go(2) }.setNegativeButton("Volver", null).show()
+    private fun confirmRemoveItem(record: Record) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle("¿Eliminar producto?")
+            .setMessage("¿Estás seguro de que deseas eliminar \"${record.title}\" del carrito?")
+            .setPositiveButton("Sí, eliminar") { _, _ ->
+                cart.remove(record.id)
+                persist()
+                render()
+                message("El producto fue eliminado del carrito.")
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun confirmClearCart() {
+        MaterialAlertDialogBuilder(this)
+            .setTitle("¿Vaciar carrito?")
+            .setMessage("Se eliminarán todos los productos de tu carrito.")
+            .setPositiveButton("Sí, vaciar") { _, _ ->
+                cart.clear()
+                persist()
+                render()
+                message("Carrito vacío.")
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun startCheckout() {
+        val session = storeState.session?.takeUnless { it.expired }
+        if (session == null) {
+            storeState.session = null
+            go(4)
+            auth(false)
+            return
+        }
+        if (cart.count == 0) {
+            message("El carrito está vacío.")
+            return
+        }
+        checkoutOpen = true
+        ventaConfirmada = null
+        pagoPaypalRealizado = false
+        paypalOrderId = null
+        submittingPurchase = false
+        checkoutFieldErrors = emptyMap()
+        checkoutGeneralError = null
+        if (contactoCorreo.isBlank()) contactoCorreo = session.email
+        if (destNombre.isBlank()) destNombre = session.name
+        loadCheckoutData(session)
+        render()
+    }
+
+    private fun loadCheckoutData(session: Session) {
+        loadingCheckoutOptions = true
+        render()
+        request({
+            val tarifasList = api.tarifasEnvio(session)
+            val puntosList = api.puntosEntrega(session)
+            val perfil = runCatching { api.perfilEnvio(session) }.getOrNull()
+            Triple(tarifasList, puntosList, perfil)
+        }) { result ->
+            loadingCheckoutOptions = false
+            result.onSuccess { (tarifasList, puntosList, perfil) ->
+                tarifas = tarifasList.ifEmpty { DEFAULT_TARIFAS_ENVIO }
+                puntos = puntosList.ifEmpty { DEFAULT_PUNTOS_ENTREGA }
+                if (perfil != null) {
+                    if (perfil.destinatario.isNotEmpty()) destNombre = perfil.destinatario
+                    if (perfil.correo.isNotEmpty()) contactoCorreo = perfil.correo
+                    if (perfil.telefono.isNotEmpty()) {
+                        destTelefono = perfil.telefono
+                        contactoTelefono = perfil.telefono
+                    }
+                    if (perfil.calle.isNotEmpty()) destCalle = perfil.calle
+                    if (perfil.numero.isNotEmpty()) destNumero = perfil.numero
+                    if (perfil.colonia.isNotEmpty()) destColonia = perfil.colonia
+                    if (perfil.cp.isNotEmpty()) destCp = perfil.cp
+                    if (perfil.ciudad.isNotEmpty()) destCiudad = perfil.ciudad
+                    if (perfil.estado.isNotEmpty()) destEstado = perfil.estado
+                }
+            }.onFailure {
+                tarifas = DEFAULT_TARIFAS_ENVIO
+                puntos = DEFAULT_PUNTOS_ENTREGA
+            }
+            render()
+        }
+    }
+
+    private fun tarifaElegida(): TarifaEnvio? {
+        if (!selectedEntrega.startsWith("tarifa-")) return null
+        val id = selectedEntrega.removePrefix("tarifa-").toIntOrNull() ?: return null
+        return tarifas.find { it.idtarifa == id }
+    }
+
+    private fun costoEnvioActual(): BigDecimal = tarifaElegida()?.precio ?: BigDecimal.ZERO
+
+    private fun showCheckout(page: LinearLayout) {
+        val confirmed = ventaConfirmada
+        if (confirmed != null) {
+            val successPanel = panel()
+            successPanel.addView(text("¡Tu pedido ha sido confirmado!", 26, green, true))
+            space(successPanel, 10)
+            successPanel.addView(text("Tu número de orden es: #${confirmed.idVenta}", 19, white, true))
+            space(successPanel, 6)
+            successPanel.addView(text("Total pagado: ${pesos(confirmed.totalVenta)}", 18, green, true))
+            space(successPanel, 10)
+            successPanel.addView(text("El stock fue actualizado y tu orden quedó registrada en el sistema. Gracias por tu compra.", 14, muted))
+            space(successPanel, 18)
+            successPanel.addView(button("Ver Mis Pedidos") {
+                checkoutOpen = false
+                ordersOpen = true
+                render()
+            })
+            successPanel.addView(button("Seguir explorando el catálogo", true) {
+                checkoutOpen = false
+                go(2)
+            })
+            page.addView(successPanel)
+            return
+        }
+
+        page.addView(link("← Volver al carrito") {
+            if (!submittingPurchase) {
+                checkoutOpen = false
+                render()
+            }
+        })
+        page.addView(text("FINALIZAR COMPRA", 11, green, true))
+        page.addView(text("Checkout y Pago", 30, white, true))
+        space(page, 12)
+
+        checkoutGeneralError?.let { err ->
+            val alert = panel().apply { background = rounded(Color.rgb(68, 24, 24), 14) }
+            alert.addView(text(err, 14, danger, true))
+            page.addView(alert)
+            space(page, 12)
+        }
+
+        val step1 = panel()
+        step1.addView(text("1. ¿Cómo quieres recibir tu pedido?", 19, white, true))
+        space(step1, 8)
+        if (loadingCheckoutOptions) {
+            step1.addView(text("Sincronizando tarifas y puntos de entrega…", 13, muted))
+            space(step1, 6)
+        }
+        step1.addView(text("Envío a domicilio (cualquier estado de la República)", 14, green, true))
+        space(step1, 6)
+        tarifas.forEach { t ->
+            val code = "tarifa-${t.idtarifa}"
+            val selected = selectedEntrega == code
+            val label = "${if (selected) "●" else "○"} ${t.paqueteria} – ${t.servicio}\nLlega en ${t.diasMin} a ${t.diasMax} días hábiles · ${pesos(t.precio)}"
+            step1.addView(button(label, !selected) {
+                if (!pagoPaypalRealizado) {
+                    selectedEntrega = code
+                    checkoutFieldErrors = emptyMap()
+                    checkoutGeneralError = null
+                    render()
+                }
+            }.apply {
+                isEnabled = !pagoPaypalRealizado
+                gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+            })
+        }
+        space(step1, 12)
+        step1.addView(text("Entrega en punto medio (Aguascalientes)", 14, green, true))
+        space(step1, 6)
+        puntos.forEach { p ->
+            val code = "punto-${p.idpunto}"
+            val selected = selectedEntrega == code
+            val horario = if (p.horarioatencion.isNotEmpty()) "\nHorario: ${p.horarioatencion}" else ""
+            val label = "${if (selected) "●" else "○"} ${p.nombrepunto} (Gratis)\n${p.direccioncompleta}$horario"
+            step1.addView(button(label, !selected) {
+                if (!pagoPaypalRealizado) {
+                    selectedEntrega = code
+                    checkoutFieldErrors = emptyMap()
+                    checkoutGeneralError = null
+                    render()
+                }
+            }.apply {
+                isEnabled = !pagoPaypalRealizado
+                gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+            })
+        }
+        if (pagoPaypalRealizado) {
+            space(step1, 6)
+            step1.addView(text("La forma de entrega y los datos quedaron protegidos porque el pago ya fue autorizado.", 12, muted))
+        }
+        page.addView(step1)
+        space(page, 14)
+
+        val esDomicilio = selectedEntrega.startsWith("tarifa-")
+        val esPuntoMedio = selectedEntrega.startsWith("punto-")
+
+        var syncFormValues: () -> Unit = {}
+
+        if (esDomicilio) {
+            val addressCard = panel()
+            addressCard.addView(text("Dirección de envío", 19, white, true))
+            space(addressCard, 4)
+            addressCard.addView(text("Tomamos la dirección de tu perfil; puedes cambiarla solo para este pedido.", 13, muted))
+            space(addressCard, 10)
+
+            val fDest = boundInput("Nombre de quien recibe", destNombre, 150, enabled = !pagoPaypalRealizado, error = checkoutFieldErrors["destinatario"]) { destNombre = it }
+            val fTel = boundInput("Teléfono (10 dígitos)", destTelefono, 10, numeric = true, enabled = !pagoPaypalRealizado, error = checkoutFieldErrors["telefono"]) { destTelefono = it }
+            val fCalle = boundInput("Calle", destCalle, 100, enabled = !pagoPaypalRealizado, error = checkoutFieldErrors["calle"]) { destCalle = it }
+            val fNum = boundInput("Número", destNumero, 20, enabled = !pagoPaypalRealizado, error = checkoutFieldErrors["numero"]) { destNumero = it }
+            val fCol = boundInput("Colonia", destColonia, 100, enabled = !pagoPaypalRealizado, error = checkoutFieldErrors["colonia"]) { destColonia = it }
+            val fCp = boundInput("Código postal (5 dígitos)", destCp, 5, numeric = true, enabled = !pagoPaypalRealizado, error = checkoutFieldErrors["cp"]) { destCp = it }
+            val fCiudad = boundInput("Ciudad", destCiudad, 50, enabled = !pagoPaypalRealizado, error = checkoutFieldErrors["ciudad"]) { destCiudad = it }
+            val fEstado = boundInput("Estado", destEstado, 50, enabled = !pagoPaypalRealizado, error = checkoutFieldErrors["estado"]) { destEstado = it }
+            val fRef = boundInput("Referencias (opcional)", destReferencias, 300, multiline = true, enabled = !pagoPaypalRealizado, error = checkoutFieldErrors["referencias"]) { destReferencias = it }
+
+            listOf(fDest, fTel, fCalle, fNum, fCol, fCp, fCiudad, fEstado, fRef).forEach { addressCard.addView(it.first) }
+
+            syncFormValues = {
+                destNombre = fDest.second.text.toString()
+                destTelefono = fTel.second.text.toString()
+                destCalle = fCalle.second.text.toString()
+                destNumero = fNum.second.text.toString()
+                destColonia = fCol.second.text.toString()
+                destCp = fCp.second.text.toString()
+                destCiudad = fCiudad.second.text.toString()
+                destEstado = fEstado.second.text.toString()
+                destReferencias = fRef.second.text.toString()
+            }
+
+            page.addView(addressCard)
+            space(page, 14)
+        } else if (esPuntoMedio) {
+            val contactCard = panel()
+            contactCard.addView(text("Datos para la entrega en punto medio", 19, white, true))
+            space(contactCard, 4)
+            contactCard.addView(text("Te contactaremos para acordar el día y la hora de la entrega.", 13, muted))
+            space(contactCard, 10)
+
+            val fCorreo = boundInput("Correo electrónico", contactoCorreo, 150, email = true, enabled = !pagoPaypalRealizado, error = checkoutFieldErrors["correo"]) { contactoCorreo = it }
+            val fTel = boundInput("Teléfono (10 dígitos)", contactoTelefono, 10, numeric = true, enabled = !pagoPaypalRealizado, error = checkoutFieldErrors["telefono"]) { contactoTelefono = it }
+            val fRef = boundInput("Referencias para la entrega (obligatorio)", contactoReferencias, 300, multiline = true, enabled = !pagoPaypalRealizado, error = checkoutFieldErrors["referencias"]) { contactoReferencias = it }
+
+            listOf(fCorreo, fTel, fRef).forEach { contactCard.addView(it.first) }
+
+            syncFormValues = {
+                contactoCorreo = fCorreo.second.text.toString()
+                contactoTelefono = fTel.second.text.toString()
+                contactoReferencias = fRef.second.text.toString()
+            }
+
+            page.addView(contactCard)
+            space(page, 14)
+        }
+
+        val cartItems = cart.items(records)
+        val subtotal = cart.total(records)
+        val iva = cart.iva(records)
+        val envio = costoEnvioActual()
+        val totalPagar = cart.totalConEnvio(records, envio)
+
+        val txCard = panel()
+        txCard.addView(text("Detalles de la Transacción", 19, white, true))
+        space(txCard, 8)
+        txCard.addView(text("Productos (${cartItems.size} ítems)", 14, green, true))
+        space(txCard, 4)
+        cartItems.forEach { (itemRecord, qty) ->
+            txCard.addView(summaryRow("${qty}x ${itemRecord.title}", pesos(itemRecord.price * qty.toBigDecimal()), white))
+        }
+        space(txCard, 8)
+        txCard.addView(summaryRow("Subtotal:", pesos(subtotal)))
+        val envioTexto = when {
+            selectedEntrega.isEmpty() -> "Elige una opción"
+            envio.compareTo(BigDecimal.ZERO) == 0 -> "Gratis"
+            else -> "+ ${pesos(envio)}"
+        }
+        txCard.addView(summaryRow("Costo de Envío:", envioTexto, if (selectedEntrega.isNotEmpty() && envio.compareTo(BigDecimal.ZERO) == 0) green else muted))
+        txCard.addView(summaryRow("IVA (16%):", "+ ${pesos(iva)}", muted))
+        space(txCard, 6)
+        txCard.addView(summaryRow("Total a Pagar:", pesos(totalPagar), green, bold = true, textSize = 20))
+        page.addView(txCard)
+        space(page, 14)
+
+        val payCard = panel()
+        payCard.addView(text("2. Detalles de Pago", 19, white, true))
+        space(payCard, 8)
+        if (!pagoPaypalRealizado) {
+            payCard.addView(text("Paga con PayPal (Sandbox MXN) para continuar con tu compra.", 14, muted))
+            space(payCard, 8)
+            payCard.addView(button("Pagar con PayPal · ${pesos(totalPagar)}") {
+                syncFormValues()
+                iniciarPagoPaypal(totalPagar)
+            })
+        } else {
+            payCard.addView(text("✓ Pago con PayPal aprobado (${paypalOrderId ?: "SANDBOX"}).", 15, green, true))
+            payCard.addView(text("Monto autorizado: ${pesos(totalPagar)}. Gracias por tu compra.", 13, muted))
+        }
+        page.addView(payCard)
+        space(page, 14)
+
+        val confirmBtnLabel = if (submittingPurchase) "Procesando Compra…" else "Confirmar Compra"
+        page.addView(button(confirmBtnLabel) {
+            syncFormValues()
+            confirmarCompra(totalPagar)
+        }.apply {
+            isEnabled = pagoPaypalRealizado && !submittingPurchase && selectedEntrega.isNotEmpty()
+        })
+    }
+
+    private fun validateCheckoutSelection(): Boolean {
+        if (selectedEntrega.isEmpty()) {
+            checkoutGeneralError = "Elige cómo quieres recibir tu pedido antes de continuar."
+            checkoutFieldErrors = emptyMap()
+            render()
+            return false
+        }
+        val validation = if (selectedEntrega.startsWith("tarifa-")) {
+            validateDireccionEnvio(
+                destinatario = destNombre,
+                telefono = destTelefono,
+                calle = destCalle,
+                numero = destNumero,
+                colonia = destColonia,
+                cp = destCp,
+                ciudad = destCiudad,
+                estado = destEstado,
+                referencias = destReferencias
+            )
+        } else {
+            validateContactoPunto(
+                correo = contactoCorreo,
+                telefono = contactoTelefono,
+                referencias = contactoReferencias
+            )
+        }
+        checkoutFieldErrors = validation.fieldErrors
+        if (!validation.isValid) {
+            checkoutGeneralError = if (selectedEntrega.startsWith("punto-")) {
+                "Por favor, completa correo, teléfono (10 dígitos) y referencias para la entrega."
+            } else {
+                "Por favor, completa correctamente la dirección de envío (teléfono de 10 dígitos y CP de 5 dígitos)."
+            }
+            render()
+            return false
+        }
+        checkoutGeneralError = null
+        return true
+    }
+
+    private fun iniciarPagoPaypal(totalPagar: BigDecimal) {
+        if (!validateCheckoutSelection()) return
+        val items = cart.items(records)
+        if (items.isEmpty()) {
+            checkoutGeneralError = "El carrito está vacío."
+            render()
+            return
+        }
+        val outOfStock = items.firstOrNull { (record, qty) -> qty > record.stock || record.stock <= 0 }
+        if (outOfStock != null) {
+            checkoutGeneralError = "Stock insuficiente para \"${outOfStock.first.title}\". Ajusta tu carrito."
+            render()
+            return
+        }
+
+        val form = column().apply { setPadding(dp(24), dp(12), dp(24), 0) }
+        form.addView(text("Comercio: PsychoRekords (Sandbox MXN)", 14, green, true))
+        space(form, 6)
+        form.addView(text("Importe total a autorizar: ${pesos(totalPagar)}", 18, white, true))
+        space(form, 8)
+        val buyerEmail = storeState.session?.email.orEmpty().ifEmpty { "comprador-sandbox@personal.example.com" }
+        val emailField = boundInput("Cuenta PayPal Sandbox", buyerEmail, 150, email = true)
+        form.addView(emailField.first)
+        form.addView(text("Al autorizar el pago se congelará la forma de entrega elegida para proteger la transacción.", 12, muted))
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle("PayPal Sandbox Checkout")
+            .setView(form)
+            .setPositiveButton("Autorizar pago") { _, _ ->
+                paypalOrderId = "PAYPAL-" + UUID.randomUUID().toString().take(8).uppercase()
+                pagoPaypalRealizado = true
+                checkoutGeneralError = null
+                render()
+                message("Pago con PayPal aprobado. Ahora confirma tu compra.")
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun confirmarCompra(totalPagar: BigDecimal) {
+        if (!validateCheckoutSelection()) return
+        if (!pagoPaypalRealizado) {
+            checkoutGeneralError = "Debes completar el pago con PayPal antes de confirmar la compra."
+            render()
+            return
+        }
+        val session = storeState.session?.takeUnless { it.expired }
+        if (session == null) {
+            storeState.session = null
+            checkoutOpen = false
+            go(4)
+            auth(false)
+            message("Tu sesión expiró. Inicia sesión de nuevo; tu carrito sigue guardado.")
+            return
+        }
+        val items = cart.items(records)
+        if (items.isEmpty()) {
+            checkoutGeneralError = "El carrito está vacío. No se puede procesar la compra."
+            render()
+            return
+        }
+
+        submittingPurchase = true
+        checkoutGeneralError = null
+        render()
+
+        val esPunto = selectedEntrega.startsWith("punto-")
+        val idEntrega = selectedEntrega.substringAfter("-").toIntOrNull() ?: 1
+
+        request({
+            if (esPunto) {
+                api.crearVentaPunto(
+                    session = session,
+                    idPunto = idEntrega,
+                    items = items,
+                    contacto = ContactoPunto(
+                        correo = contactoCorreo.trim(),
+                        telefono = contactoTelefono.trim(),
+                        referencias = contactoReferencias.trim()
+                    ),
+                    expectedTotal = totalPagar
+                )
+            } else {
+                api.crearVentaDomicilio(
+                    session = session,
+                    idTarifa = idEntrega,
+                    items = items,
+                    direccion = DireccionEnvio(
+                        destinatario = destNombre.trim(),
+                        telefono = destTelefono.trim(),
+                        calle = destCalle.trim(),
+                        numero = destNumero.trim(),
+                        colonia = destColonia.trim(),
+                        cp = destCp.trim(),
+                        ciudad = destCiudad.trim(),
+                        estado = destEstado.trim(),
+                        referencias = destReferencias.trim()
+                    ),
+                    expectedTotal = totalPagar
+                )
+            }
+        }) { result ->
+            submittingPurchase = false
+            result.onSuccess { confirmada ->
+                ventaConfirmada = confirmada
+                cart.clear()
+                persist()
+                loadCatalog()
+                render()
+            }.onFailure { err ->
+                if (err is ApiError && err.isUnauthorized) {
+                    storeState.session = null
+                    checkoutOpen = false
+                    go(4)
+                    message("Tu sesión expiró o fue revocada. Inicia sesión nuevamente.")
+                } else {
+                    checkoutGeneralError = errorMessage(err)
+                    loadCatalog()
+                    render()
+                }
+            }
+        }
     }
 
     private fun showAccount(page: LinearLayout) {
@@ -580,9 +1344,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun faq() {
         val questions = arrayOf("¿Qué formatos encontraré?", "¿Cómo hago un pedido?", "¿Cómo cuido mis vinilos?")
-        val answers = listOf("Vinilos, CDs y cassettes, como en nuestro catálogo web.",
-            "Elige una pieza, agrégala al carrito y revisa el resumen. En esta primera versión no se realizan compras.",
-            "Usa un cepillo antiestático, evita tocar los surcos y guarda tus discos en sus fundas, en posición vertical.")
+        val answers = listOf(
+            "Vinilos, CDs y cassettes, como en nuestro catálogo web.",
+            "Elige tus piezas en el catálogo, agrégalas al carrito, selecciona envío a domicilio o entrega en punto medio en Aguascalientes, autoriza tu pago con PayPal y confirma tu pedido.",
+            "Usa un cepillo antiestático, evita tocar los surcos y guarda tus discos en sus fundas, en posición vertical."
+        )
         MaterialAlertDialogBuilder(this).setTitle("Preguntas frecuentes").setItems(questions) { _, which ->
             MaterialAlertDialogBuilder(this).setTitle(questions[which]).setMessage(answers[which])
                 .setPositiveButton("Entendido", null).show()
@@ -621,6 +1387,65 @@ class MainActivity : AppCompatActivity() {
         return wrapper to edit
     }
 
+    private fun boundInput(
+        label: String,
+        value: String,
+        maxLength: Int,
+        numeric: Boolean = false,
+        email: Boolean = false,
+        multiline: Boolean = false,
+        enabled: Boolean = true,
+        error: String? = null,
+        onChanged: (String) -> Unit = {}
+    ): Pair<TextInputLayout, TextInputEditText> {
+        val pair = input(label, value)
+        pair.first.error = error
+        pair.second.isEnabled = enabled
+        pair.second.filters = arrayOf(InputFilter.LengthFilter(maxLength))
+        if (multiline) {
+            pair.second.isSingleLine = false
+            pair.second.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            pair.second.minLines = 2
+            pair.second.maxLines = 3
+            pair.second.gravity = Gravity.TOP or Gravity.START
+        } else {
+            pair.second.inputType = when {
+                numeric -> InputType.TYPE_CLASS_NUMBER
+                email -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
+                else -> InputType.TYPE_CLASS_TEXT
+            }
+        }
+        pair.second.setOnFocusChangeListener { v, hasFocus ->
+            if (hasFocus) {
+                v.postDelayed({
+                    val rect = android.graphics.Rect(0, 0, v.width, v.height + dp(48))
+                    v.requestRectangleOnScreen(rect, false)
+                }, 180)
+            }
+        }
+        pair.second.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                onChanged(s?.toString().orEmpty())
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+        return pair
+    }
+
+    private fun summaryRow(
+        left: String,
+        right: String,
+        rightColor: Int = white,
+        bold: Boolean = false,
+        textSize: Int = 14
+    ): LinearLayout {
+        val line = row().apply { setPadding(0, dp(2), 0, dp(2)) }
+        line.addView(text(left, textSize, if (bold) white else muted, bold), LinearLayout.LayoutParams(0, -2, 1f))
+        line.addView(text(right, textSize, rightColor, bold))
+        return line
+    }
+
     private fun empty(parent: LinearLayout, title: String, description: String, action: String, onClick: () -> Unit) {
         val panel = panel()
         panel.addView(text("◎", 76, green).apply { gravity = Gravity.CENTER })
@@ -633,16 +1458,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadCatalog() {
-        loadingCatalog = true
-        catalogError = null
-        render()
+        if (records.isEmpty()) {
+            loadingCatalog = true
+            catalogError = null
+            render()
+        }
         request(api::products) { result ->
             loadingCatalog = false
             result.onSuccess { products ->
                 records = products
-                cart.restore(records) { prefs.getInt("cart_$it", 0) }
+                cart.clampToStock(records)
                 persist()
-            }.onFailure { catalogError = errorMessage(it) }
+            }.onFailure {
+                if (records.isEmpty()) catalogError = errorMessage(it)
+            }
             render()
         }
     }
@@ -676,7 +1505,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun message(value: String) { Snackbar.make(container, value, Snackbar.LENGTH_LONG).setAnchorView(nav).show() }
+    private fun message(value: String) {
+        val snackbar = Snackbar.make(container, value, Snackbar.LENGTH_LONG)
+        if (nav.visibility == View.VISIBLE) snackbar.setAnchorView(nav)
+        snackbar.show()
+    }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
     private fun column() = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
     private fun row() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -692,7 +1525,7 @@ class MainActivity : AppCompatActivity() {
         text = label; isAllCaps = false; textSize = 14f; minHeight = dp(48); cornerRadius = dp(14)
         typeface = emphasisFont
         insetTop = dp(4); insetBottom = dp(4)
-        setPadding(dp(12), 0, dp(12), 0)
+        setPadding(dp(12), dp(8), dp(12), dp(8))
         backgroundTintList = ColorStateList.valueOf(if (outline) surface else green)
         setTextColor(if (outline) green else dark)
         if (outline) { strokeWidth = dp(1); strokeColor = ColorStateList.valueOf(Color.rgb(51, 87, 65)) }

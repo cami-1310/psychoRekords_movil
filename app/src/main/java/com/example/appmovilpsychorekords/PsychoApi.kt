@@ -26,9 +26,12 @@ class StoreState : ViewModel() {
     }
 }
 
-class ApiError(message: String) : IOException(message)
+class ApiError(message: String, val statusCode: Int = 0) : IOException(message)
 
 class PsychoApi(private val baseUrl: String) {
+    fun orders(session: Session): List<TrackedOrder> =
+        parseOrders(JSONArray(request("ventas/mis-pedidos", token = session.token)))
+
     fun products(): List<Record> {
         val data = JSONArray(request("productos"))
         return List(data.length()) { index ->
@@ -70,10 +73,21 @@ class PsychoApi(private val baseUrl: String) {
         request("usuarios/logout", JSONObject(), session.token)
     }
 
+    fun changePassword(session: Session, current: String, replacement: String): String {
+        val body = JSONObject().put("passwordActual", current).put("passwordNueva", replacement)
+        val response = request("usuarios/perfil/password", body, session.token, "PATCH")
+        return JSONObject(response).optString("message", "Contraseña actualizada.")
+    }
+
     private fun credentials(email: String, password: String) =
         JSONObject().put("correoElectronico", email).put("password", password)
 
-    private fun request(path: String, body: JSONObject? = null, token: String? = null): String {
+    private fun request(
+        path: String,
+        body: JSONObject? = null,
+        token: String? = null,
+        method: String = if (body == null) "GET" else "POST"
+    ): String {
         val connection = URL("${baseUrl.trimEnd('/')}/$path").openConnection() as HttpURLConnection
         try {
             connection.connectTimeout = 8000
@@ -82,7 +96,7 @@ class PsychoApi(private val baseUrl: String) {
             connection.setRequestProperty("Accept", "application/json")
             if (token != null) connection.setRequestProperty("Authorization", "Bearer $token")
             if (body != null) {
-                connection.requestMethod = "POST"
+                connection.requestMethod = method
                 connection.doOutput = true
                 connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
@@ -93,7 +107,7 @@ class PsychoApi(private val baseUrl: String) {
             val message = if (status in 400..499) {
                 runCatching { JSONObject(response).getString("message") }.getOrNull()
             } else null
-            throw ApiError(message ?: "La API respondió con un error ($status).")
+            throw ApiError(message ?: "La API respondió con un error ($status).", status)
         } finally {
             connection.disconnect()
         }

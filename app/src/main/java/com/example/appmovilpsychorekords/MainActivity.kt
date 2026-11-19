@@ -49,6 +49,7 @@ class MainActivity : AppCompatActivity() {
     private var query = ""
     private var format = "Todos"
     private var onlyFavorites = false
+    private var ordersOpen = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -70,6 +71,7 @@ class MainActivity : AppCompatActivity() {
         query = savedInstanceState?.getString("query").orEmpty()
         format = savedInstanceState?.getString("format") ?: "Todos"
         onlyFavorites = savedInstanceState?.getBoolean("favorites", false) ?: false
+        ordersOpen = savedInstanceState?.getBoolean("orders", false) ?: false
         container = findViewById(R.id.screen_container)
         nav = findViewById(R.id.bottom_navigation)
         listOf("Inicio", "Catálogo", "Carrito", "Cuenta").forEachIndexed { index, title ->
@@ -85,6 +87,7 @@ class MainActivity : AppCompatActivity() {
         nav.itemActiveIndicatorColor = ColorStateList.valueOf(Color.rgb(27, 70, 43))
         nav.selectedItemId = tab
         nav.setOnItemSelectedListener { item ->
+            ordersOpen = false
             tab = item.itemId
             detailId = 0
             render()
@@ -92,7 +95,8 @@ class MainActivity : AppCompatActivity() {
         }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (detailId != 0) { detailId = 0; render() }
+                if (ordersOpen) { ordersOpen = false; render() }
+                else if (detailId != 0) { detailId = 0; render() }
                 else if (tab != 1) go(1)
                 else { isEnabled = false; onBackPressedDispatcher.onBackPressed() }
             }
@@ -108,6 +112,7 @@ class MainActivity : AppCompatActivity() {
         outState.putString("query", query)
         outState.putString("format", format)
         outState.putBoolean("favorites", onlyFavorites)
+        outState.putBoolean("orders", ordersOpen)
     }
 
     private fun persist() {
@@ -135,6 +140,24 @@ class MainActivity : AppCompatActivity() {
     private fun render() {
         container.removeAllViews()
         updateBadge()
+        if (ordersOpen) {
+            val session = storeState.session?.takeUnless { it.expired }
+            if (session != null) {
+                container.addView(OrderTrackingScreen(
+                    this, this, api, session, storeState.network,
+                    isCurrentSession = { storeState.session?.token == session.token },
+                    onExpired = {
+                        storeState.session = null
+                        ordersOpen = false
+                        render()
+                        auth(false)
+                    },
+                    onBack = { ordersOpen = false; render() }
+                ))
+                return
+            }
+            ordersOpen = false
+        }
         val scroll = ScrollView(this).apply { isFillViewport = true; clipToPadding = false }
         val page = column().apply { setPadding(dp(20), dp(12), dp(20), dp(24)) }
         scroll.addView(page)
@@ -376,6 +399,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             card.addView(text("Hola, ${session.name}", 21, white, true))
             card.addView(text(session.email, 14, muted))
+            card.addView(button("Cambiar contraseña", true) { changePassword(session) })
             card.addView(button("Cerrar sesión", true) {
                 storeState.session = null
                 render()
@@ -388,12 +412,97 @@ class MainActivity : AppCompatActivity() {
         space(page, 18)
         page.addView(button("Mis favoritos · ${favorites.size}", true) { onlyFavorites = true; query = ""; format = "Todos"; go(2) })
         page.addView(button("Mis pedidos", true) {
-            MaterialAlertDialogBuilder(this).setTitle("Mis pedidos")
-                .setMessage("El historial de pedidos se puede consultar desde la web.")
-                .setPositiveButton("Entendido", null).show()
+            if (storeState.session?.takeUnless { it.expired } == null) {
+                auth(false)
+                message("Inicia sesión para consultar tus pedidos.")
+            } else {
+                ordersOpen = true
+                render()
+            }
         })
         page.addView(button("Sobre nosotros", true) { about() })
         page.addView(button("Preguntas frecuentes", true) { faq() })
+    }
+
+    private fun changePassword(session: Session) {
+        if (session.expired) {
+            storeState.session = null
+            render()
+            auth(false)
+            return
+        }
+        val form = column().apply { setPadding(dp(24), dp(8), dp(24), dp(12)) }
+        val current = input("Contraseña actual")
+        val replacement = input("Nueva contraseña")
+        val confirmation = input("Confirmar nueva contraseña")
+        val fields = listOf(current, replacement, confirmation)
+        fields.forEach { (wrapper, edit) ->
+            edit.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            edit.typeface = regularFont
+            edit.isSaveEnabled = false
+            wrapper.endIconMode = TextInputLayout.END_ICON_PASSWORD_TOGGLE
+            form.addView(wrapper)
+        }
+        form.addView(text("Usa al menos 8 caracteres y una contraseña diferente a la actual.", 13, muted))
+        val status = text("", 14, muted).apply { accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE }
+        form.addView(status)
+        val scroll = ScrollView(this).apply { addView(form) }
+        val dialog = MaterialAlertDialogBuilder(this).setTitle("Cambiar contraseña")
+            .setView(scroll).setPositiveButton("Guardar", null).setNegativeButton("Cancelar", null).create()
+        dialog.setOnShowListener {
+            val save = dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE)
+            val cancel = dialog.getButton(android.app.AlertDialog.BUTTON_NEGATIVE)
+            save.setOnClickListener {
+                val old = current.second.text.toString()
+                val new = replacement.second.text.toString()
+                val repeated = confirmation.second.text.toString()
+                current.first.error = when {
+                    old.isEmpty() -> "Escribe tu contraseña actual"
+                    old.toByteArray(Charsets.UTF_8).size > 256 -> "La contraseña excede 256 bytes"
+                    else -> null
+                }
+                replacement.first.error = when {
+                    new.length < 8 -> "Usa al menos 8 caracteres"
+                    new.toByteArray(Charsets.UTF_8).size > 256 -> "La contraseña excede 256 bytes"
+                    new == old -> "Debe ser diferente a la contraseña actual"
+                    else -> null
+                }
+                confirmation.first.error = if (repeated.isEmpty() || repeated != new) "Las contraseñas no coinciden" else null
+                if (fields.any { it.first.error != null }) return@setOnClickListener
+                save.isEnabled = false
+                cancel.isEnabled = false
+                fields.forEach { it.first.isEnabled = false }
+                dialog.setCancelable(false)
+                status.text = "Guardando…"
+                request({ api.changePassword(session, old, new) }) { result ->
+                    if (storeState.session?.token != session.token) {
+                        dialog.dismiss()
+                        return@request
+                    }
+                    result.onSuccess {
+                        fields.forEach { field -> field.second.text?.clear() }
+                        dialog.dismiss()
+                        message(it)
+                    }.onFailure { error ->
+                        if (error is ApiError && error.statusCode in listOf(401, 403)) {
+                            fields.forEach { it.second.text?.clear() }
+                            dialog.dismiss()
+                            storeState.session = null
+                            render()
+                            auth(false, session.email)
+                            message("Tu sesión terminó. Inicia sesión para continuar.")
+                            return@onFailure
+                        }
+                        save.isEnabled = true
+                        cancel.isEnabled = true
+                        fields.forEach { it.first.isEnabled = true }
+                        dialog.setCancelable(true)
+                        status.text = errorMessage(error)
+                    }
+                }
+            }
+        }
+        dialog.show()
     }
 
     private fun auth(register: Boolean, initialEmail: String = "") {
